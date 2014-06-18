@@ -37,17 +37,17 @@ options:
         required: true
     dest:
         description:
-            - export file to write.
+            - Export file to write
         required: false
         default: /etc/exports
     clients:
         description:
-            - Address o list of addresses of the nfs clients
+            - Address or list of addresses of the nfs clients
         required: false
         default: "'*', which means `all`"
     options:
         description:
-            - nfs export options.
+            - nfs export options
         required: false
         default: ro,root_squash
 examples:
