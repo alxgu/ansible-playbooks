@@ -37,23 +37,64 @@ options:
         required: true
     dest:
         description:
-            - Export file to write
+            - export file to write
         required: false
         default: /etc/exports
     clients:
         description:
-            - Address or list of addresses of the nfs clients
+            - Address o list of addresses of the nfs clients
         required: false
         default: "'*', which means `all`"
+    fsid:
+        description:
+             - Activates the use of fsid. It increase the fsid with every exported path
+        required: no
+        default: True
     options:
         description:
             - nfs export options
         required: false
-        default: ro,root_squash
-examples:
-    - code: nfsexport path=/home clients=10.0.0.1 options=rw
+        default: ro,root_squash, no_subtree_check
 """
+EXAMPLES = '''
+# Export /home read writeable for 10.0.0.1
+- code: nfsexport path=/home clients=10.0.0.1 options=rw
+
+# Export the directory /var/www for the subnet 192.168.1.0/26 with fsid support
+- code: nfsexport path=/var/www/ clients=192.168.1.0/26 options=rw,sync fsid=True
+'''
 import os
+import itertools
+
+# Get the highest used FSID and add 1
+def get_new_fsid(module):
+    fsid = 0
+    current_exports = open(module.params['dest']).readlines()
+    for i, line in enumerate(current_exports):
+        # Split line by fsid if found
+        if "fsid" in line:
+            fsid_split = line.strip().split("fsid=", 2)
+            fsid_in_line = int("".join(itertools.takewhile(str.isdigit, fsid_split[1])))
+            if fsid_in_line > fsid:
+                fsid = fsid_in_line
+    return str(fsid + 1)
+
+# Returns the fsid of the exported path. If no fsid is used it returns False
+def get_fsid_of_path(module, path):
+    current_exports = open(module.params['dest']).readlines()
+    for i, line in enumerate(current_exports):
+        # To avoid errors with empty lines
+        try:
+            line_path = line.split()[0].strip()
+        except:
+            pass
+        if path == line_path:
+            if "fsid" in line:
+                fsid_split = line.strip().split("fsid=", 2)
+                fsid_in_line = "".join(itertools.takewhile(str.isdigit, fsid_split[1]))
+                return fsid_in_line
+            else:
+                return False
 
 def main():
     module = AnsibleModule(
@@ -61,53 +102,76 @@ def main():
             path      = dict(required=True),
             dest      = dict(required=False, default='/etc/exports'),
             clients   = dict(required=False, default='*'),
-            options   = dict(required=False, default='ro,root_squash'),
+            fsid      = dict(required=False, default=True, type='bool'),
+            options   = dict(required=False, default='ro,root_squash,no_subtree_check'),
             )
         )
 
     params = module.params
+    # raise an error if destination is not writeable
+    if os.path.isfile(params['dest']) and not os.access(params['dest'], os.W_OK):
+        module.fail_json(msg="Destination %s not writable. Maybe run as root." % (params['dest']))
     params['path'] = params['path'].strip()
+
+    # Check if path directory exist
+    if not os.path.isdir(params['path']):
+        module.fail_json(msg="Path %s is not a directory or does not exists!" % params['path'])
 
     client_list = params['clients'].split(',')
     exports = []
-    for client in client_list:
-        exports.append("%s(%s)" % (client, params['options']))
-    clients = str.join(' ', exports)
-    exportline = "%s %s\n" % (params['path'], clients )
 
-    # Check if destination file exists already
-    if os.path.exists(params['dest']):
+    # Check if destination file exists already and is not empty
+    if os.path.exists(params['dest']) and os.stat(params['dest']).st_size > 0:
         current_exports = open(params['dest'], 'r').readlines()
         # Check if the parameters match an export which is already
         # defined
         for i, line in enumerate(current_exports):
-            try: #try block to avoid empty lines, which would raise 'index out of range'
-              path = line.split()[0].strip()
+            try:  # To avoid errors with empty lines
+                path = line.split()[0].strip()
             except:
-              pass
+                pass
             if path == params['path']:
+                if params['fsid']:
+                    fsid_of_path = get_fsid_of_path(module, path)  # Check if path already has a fsid
+                    if not fsid_of_path:
+                        params['options'] = params['options'] + ",fsid=" + get_new_fsid(module)
+                    else:
+                        params['options'] = params['options'] + ",fsid=" + fsid_of_path
+
+                for client in client_list:
+                    exports.append("%s(%s)" % (client, params['options']))
+                clients = str.join(' ', exports)
+                exportline = "%s %s\n" % (params['path'], clients)
+
                 if line.split(' ', 1)[1].strip() == clients:
                     # It matches, but it's not changed.
-                    module.exit_json(changed=False)
+                    module.exit_json(changed=False, msg="already exported", share=params['path'])
                 else:
                     # It matches, and it's changed. Update the file!
                     current_exports[i] = exportline
                     fd = open(params['dest'], 'w')
                     fd.writelines(current_exports)
                     fd.close()
-                    module.exit_json(changed=True)
+                    module.exit_json(changed=True, share=params['path'])
 
-        # Export path not present, proceed and add one.
+    # Destination or path does not exist.
+
+    if params['fsid']:
+        params['options'] = params['options'] + ",fsid=" + get_new_fsid(module)
+
+    for client in client_list:
+        exports.append("%s(%s)" % (client, params['options']))
+    clients = str.join(' ', exports)
+    exportline = "%s %s\n" % (params['path'], clients)
+
+    # Export path not present, proceed and add one.
     fd = open(params['dest'], 'a')
     fd.write(exportline)
     fd.close()
-    module.exit_json(changed=True)
+    module.exit_json(changed=True, share=params['path'])
 
-    # fd = open(params['dest'], 'w')
-    # fd.write(TEMPLATE)
-    # fd.close()
-    # module.exit_json(changed=True)
 
 # include magic from lib/ansible/module_common.py
 #<<INCLUDE_ANSIBLE_MODULE_COMMON>>
+
 main()
